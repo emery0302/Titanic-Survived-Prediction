@@ -1,0 +1,286 @@
+---
+title: "Titanic survived prediction"
+author: "Emery"
+date: '2023-04-10'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+```{r}
+# Load required libraries
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(forcats)
+library(naniar)
+library(randomForest)
+library(reshape2)
+library(caret)
+```
+
+
+```{r}
+# Read data 
+train <- read_csv("~/Documents/R_Practice/Titanic/train.csv")
+str(train)
+
+test <- read_csv("~/Documents/R_Practice/Titanic/test.csv")
+str(test)
+```
+
+```{r}
+# Change data types
+train <- train %>% 
+  mutate(Survived = as.factor(Survived),
+         Sex = as.factor(Sex),
+         Embarked = as.factor(Embarked),
+         Pclass = as.factor(Pclass))
+
+test <- test %>% 
+  mutate(Sex = as.factor(Sex),
+         Embarked = as.factor(Embarked),
+         FamilySize = as.factor(SibSp + Parch + 1),
+         Pclass = as.factor(Pclass))
+```
+
+```{r}
+# Explore the dataset
+cat("Summary statistics for the dataset:\n")
+summary(train)
+```
+
+```{r}
+# Explore the missing values
+na_count <- sapply(train, function(y) sum(length(which(is.na(y)))))
+na_count <- data.frame(na_count) %>%  print()
+```
+
+```{r}
+# Visualize missing values
+cat("\nVisualizing missing values:\n")
+gg_miss_var(train)
+# More than 600 missing values in Cabin, and nearly 200 in Age
+```
+
+```{r}
+# Impute missing values
+# Mean of Age replaces missing age values
+train$Age <- ifelse(is.na(train$Age), mean(train$Age, na.rm = TRUE), train$Age) 
+
+# "S" replaces missing embarked
+train$Embarked <- as.factor(ifelse(is.na(train$Embarked), "S", as.character(train$Embarked)))
+```
+
+```{r}
+# Feature engineering
+train$FamilySize <- as.factor(train$SibSp + train$Parch + 1)
+train$Family <- as.numeric(train$FamilySize)
+```
+
+
+```{r}
+# Manually put all numerical variables in a list, except for the outcome column
+numerical_vars <- c("Age", "SibSp", "Parch", "Fare", "Family")
+
+```
+
+
+```{r}
+# Correlation
+cor_matrix <- cor(train[, numerical_vars])
+
+# Get lower triangle of the correlation matrix
+  get_lower_tri<-function(cormat){
+    cormat[upper.tri(cormat)] <- NA
+    return(cormat)
+  }
+lower_tri <- get_lower_tri(cor_matrix)
+lower_tri
+```
+
+```{r}
+# Visualize the correlation in a heat map
+melted_cormat <- melt(lower_tri, na.rm = TRUE)
+ggheatmap <- ggplot(melted_cormat, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+ scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+   midpoint = 0, limit = c(-1,1), space = "Lab", 
+    name="Pearson\nCorrelation") +
+  theme_minimal()+ # minimal theme
+ theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1))+
+ coord_fixed()
+
+# Print the heatmap
+ggheatmap + 
+geom_text(aes(Var2, Var1, label = round(value,3)), color = "black", size = 4) +
+theme(
+  axis.title.x = element_blank(),
+  axis.title.y = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.border = element_blank(),
+  panel.background = element_blank(),
+  axis.ticks = element_blank(),
+  legend.justification = c(1, 0),
+  legend.position = c(1, 0.1),
+  legend.direction = "horizontal")+
+  guides(fill = guide_colorbar(barwidth = 8, barheight = 1.5,
+                title.position = "top", title.hjust = 0.5))
+
+
+# family consists of SibSp and Parch, so the correlation is strong.
+```
+
+```{r}
+# Plot the distribution of different values for every numerical variable in the list in the output column
+for (var in numerical_vars) {
+  # Plot the distribution for the current numerical variable
+  print(ggplot(train, aes_string(x = var, fill = "factor(Survived)")) +
+    geom_histogram(position = "identity", alpha = 0.5, bins = 30) +
+    labs(title = paste("Distribution of", var, "by Survived"),
+         x = var,
+         y = "Count",
+         fill = "Survived") +
+    theme_minimal() +
+    scale_fill_discrete(name = "Survived", labels = c("No", "YES")) +
+    theme(legend.position = "top") +
+    facet_grid(Survived ~ .))
+  
+}
+```
+
+```{r}
+#  Manually put all categorical variables in a list, except for the outcome column
+categorical_vars <- c("Pclass", "Sex", "Embarked", "FamilySize")
+```
+
+```{r}
+# Plot the proportion of different values for every categorical variable in the list in the output column
+for (var in categorical_vars) {
+  # Calculate proportion of different values of categorical variables within each output group
+  proportions <- train %>%
+    group_by(Survived, !!sym(var)) %>%
+    summarise(count = n()) %>%
+    mutate(percentage = count / sum(count) * 100)
+  
+  print(ggplot(proportions, aes(x = Survived, y = percentage, fill = factor(!!sym(var)))) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = paste("Proportion of", var, "by Survived"),
+         x = "Survived",
+         y = "Percentage",
+         fill = var) +
+    theme_minimal() +
+    scale_fill_discrete(name = var) +
+    geom_text(aes(label = round(percentage, 1)), position = position_dodge(width = 0.9), vjust = -0.5) +
+    theme(legend.position = "bottom"))
+}
+```
+
+```{r}
+# Visualize comparison between genders by survived rates
+train_sex <- train %>% 
+  group_by(Sex) %>% 
+  summarise(Survived = mean(Survived == 1) * 100,
+            Unsurvived = 100 - Survived)
+
+ggplot(train_sex, aes(x= Sex, y=Survived, fill = Sex)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Survived by Sex")
+# Female have higher survived rate (75%) and male are (20%)
+```
+
+```{r}
+# Visualize comparison between Classes by survived rates
+train_Pclass <- train %>% 
+  group_by(Pclass) %>% 
+  summarise(Survived = mean(Survived == 1) * 100,
+            Unsurvived = 100 - Survived)
+
+ggplot(train_Pclass, aes(x= Pclass, y=Survived, fill = Pclass)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Survived by Passenger Class")
+
+# class 1 has higher survived rate (63%), class 2 follows (47%), and class 3 has the 
+# least survived rate (24%).
+```
+
+
+```{r}
+# Visualize comparison between Family size by survived rates
+
+train_group <- train %>% 
+  group_by(FamilySize) %>% 
+  summarise(Survived = mean(Survived == 1) * 100,
+            Unsurvived = 100 - Survived)
+
+ggplot(train_group, aes(x = FamilySize, y = Survived, fill= FamilySize)) +
+  geom_bar(stat='identity') +
+  theme_minimal() +
+  labs(title = "Survived by Family Size")
+
+# Different family sizes have different survived rate, when family size is 4, the survived rate is the highest
+```
+
+```{r}
+# Train the Random Forest model
+
+set.seed(52)
+trainID <- caret::createDataPartition(train$Survived, p=0.7, list = FALSE)
+train_set <- train[trainID,] ; test_set <- train[-trainID,]
+
+# Train the Random Forest models (when SibSp and Parch are individual variables or
+# combine to Familisize)
+
+rf_model <- randomForest(Survived ~ Pclass + Sex + Age + SibSp + Parch + Fare + Embarked, data = train_set, ntree = 500)
+
+rf_model_1 <- randomForest(Survived ~ Pclass + Sex + Age + Fare + Embarked + FamilySize, data = train_set, ntree = 500)
+
+plot(rf_model)
+
+```
+
+```{r}
+# Evaluate the model performance
+
+confusionMatrix(predict(rf_model,test_set), test_set$Survived)
+confusionMatrix(predict(rf_model_1,test_set), test_set$Survived)
+
+
+# rf_model_1 has more accuracy than rf_model, so when SibSp and Parch are combined to 
+# a variable is more accuracy.
+```
+
+```{r}
+# Creating Prediction File
+pred <- predict(rf_model_1,test_set, type = 'prob')
+pred_1 <- predict(rf_model_1,test, type = 'prob')
+
+prediction <- data.frame(PassengerId = test_set$PassengerId , Survived = pred)
+
+prediction_1 <- data.frame(PassengerId = test$PassengerId , Survived = pred_1)
+
+```
+
+
+```{r}
+pre <- predict(rf_model_1,test)
+pre_1 <- data.frame(PassengerId = test$PassengerId , Survived = pre)
+
+write.csv(pre_1,"submission.csv", row.names = FALSE)
+```
+
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+
